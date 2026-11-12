@@ -633,6 +633,8 @@ class InferenceServerBackend:
                 f"{model.name} has no {device} spec — serving it through the "
                 f"{support.serve_as} one."
             )
+        if workflow != "server":
+            self._require_running_server(model, workflow, port)
         # registry.ensure may clone the repo and build a venv — minutes of work
         # that now renders its own steps (see tools/installers.py).
         entry = self.registry.ensure(TOOL, offline=offline)
@@ -770,6 +772,32 @@ class InferenceServerBackend:
             f"to free them, then re-run `tt serve {model.name}`.",
             exit_code=ExitCode.TOOL_FAILED,
             reason="serve.device.in_use",
+        )
+
+    def _require_running_server(
+        self, model: ModelInfo, workflow: str, port: int | None
+    ) -> None:
+        """benchmarks/evals are clients: run.py gets no --docker-server, so it
+        starts nothing and points its load generator at the service port.
+
+        With nothing listening there, run.py still spends minutes building its
+        client venvs before the first request fails. Refused here instead, while
+        the fix (start the server first) can be said. A non-numeric SERVICE_PORT
+        is the user's to own, so it is passed through unchecked.
+        """
+        setting = self._service_port(port)
+        if not setting.isdigit() or not boot.port_is_free(int(setting)):
+            return
+        port_flag = f" --port {setting}" if port is not None else ""
+        raise TTError(
+            f"No server is running on port {setting} for {workflow} to target.",
+            why=f"`--workflow {workflow}` runs a client against an already-running "
+            "server; it does not start one.",
+            next_step=f"Start one first — `tt serve {model.name}{port_flag}` — "
+            f"wait for it to be ready, then re-run `tt serve {model.name} "
+            f"--workflow {workflow}{port_flag}` from another terminal.",
+            exit_code=ExitCode.USAGE,
+            reason="serve.workflow.no_server",
         )
 
     def _free_service_port(self, model: ModelInfo, port: int | None) -> int | None:

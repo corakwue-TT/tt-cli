@@ -72,6 +72,16 @@ def fake_server(inference_bin):
     return inference_bin
 
 
+@pytest.fixture
+def server_running(fake_server, monkeypatch):
+    """benchmarks/evals target an already-running server: make the service port
+    look taken, as it is while `tt serve <model>` runs in another terminal.
+    Depends on fake_server so it overrides the conftest's all-ports-free stub."""
+    monkeypatch.setattr(
+        "tenstorrent.backends.serving.boot.port_is_free", lambda port: False
+    )
+
+
 @pytest.mark.fakes_only
 def test_serve_streams_run_py(runner, docker_present, fake_server, isolated_dirs, monkeypatch):
     # without tt-smi available, auto-detect degrades to a warning and no --device
@@ -105,7 +115,9 @@ def test_serve_shows_progress_and_where_the_raw_output_went(
 
 
 @pytest.mark.fakes_only
-def test_serve_benchmarks_keeps_the_tools_own_output(runner, docker_present, fake_server):
+def test_serve_benchmarks_keeps_the_tools_own_output(
+    runner, docker_present, fake_server, server_running
+):
     """A checklist suits a boot with known steps; a benchmark run's own output
     is the result, so it is streamed through untouched."""
     result = runner.invoke(app, ["serve", "Llama-3.1-8B-Instruct", "--workflow", "benchmarks"])
@@ -157,12 +169,40 @@ def test_serve_autodetects_device_from_tt_smi(
 
 
 @pytest.mark.fakes_only
-def test_serve_benchmarks_workflow(runner, docker_present, fake_server):
+def test_serve_benchmarks_workflow(runner, docker_present, fake_server, server_running):
     result = runner.invoke(app, ["serve", "Llama-3.1-8B-Instruct", "--workflow", "benchmarks"])
     assert result.exit_code == 0
     argv = json.loads(fake_server.read_text().splitlines()[-1])
     assert argv[argv.index("--workflow") + 1] == "benchmarks"
     assert "--docker-server" not in argv  # only the server workflow needs it
+
+
+@pytest.mark.fakes_only
+@pytest.mark.parametrize("workflow", ["benchmarks", "evals"])
+def test_client_side_workflows_refuse_without_a_running_server(
+    runner, docker_present, fake_server, workflow
+):
+    """benchmarks/evals start no server, so with nothing on the service port
+    run.py would build its client venvs and then fail. Refused up front, with
+    the command that starts the server, and before run.py is ever invoked."""
+    result = runner.invoke(
+        app, ["serve", "Llama-3.1-8B-Instruct", "--workflow", workflow]
+    )
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert "No server is running" in result.output
+    assert "tt serve Llama-3.1-8B-Instruct" in result.output
+    assert not fake_server.exists() or not fake_server.read_text().strip()
+
+
+@pytest.mark.fakes_only
+def test_client_side_refusal_names_the_chosen_port(runner, docker_present, fake_server):
+    result = runner.invoke(
+        app,
+        ["serve", "Llama-3.1-8B-Instruct", "--workflow", "benchmarks", "--port", "8123"],
+    )
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert "port 8123" in result.output
+    assert "--port 8123" in result.output
 
 
 @pytest.mark.fakes_only
@@ -224,7 +264,7 @@ def test_serve_accepts_a_token_the_checkout_already_recorded(
 
 @pytest.mark.fakes_only
 def test_serve_client_side_workflows_need_no_token_up_front(
-    runner, docker_present, fake_server, no_hf_token
+    runner, docker_present, fake_server, no_hf_token, server_running
 ):
     """Benchmarks and evals run without --docker-server, so run.py does not
     require the token — and they stream on the inherited terminal anyway, where
@@ -1050,7 +1090,7 @@ def test_serve_runs_the_server_unauthenticated(runner, docker_present, fake_serv
 
 @pytest.mark.fakes_only
 def test_serve_does_not_disable_auth_for_client_side_workflows(
-    runner, docker_present, fake_server
+    runner, docker_present, fake_server, server_running
 ):
     """--no-auth is about the server tt starts; benchmarks and evals run against
     one and never take it."""
@@ -1567,7 +1607,7 @@ def test_login_store_token_is_seeded_when_the_shell_has_none(
 
 @pytest.mark.fakes_only
 def test_no_token_anywhere_seeds_nothing(
-    runner, docker_present, fake_server, inference_env_log, no_shell_hf_token
+    runner, docker_present, fake_server, inference_env_log, no_shell_hf_token, server_running
 ):
     # The server workflow refuses without a token (see
     # test_serve_refuses_when_there_is_no_hf_token); evals runs without one.
